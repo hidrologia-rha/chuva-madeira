@@ -139,6 +139,11 @@
    aside>.foot{margin-bottom:24px}
    .mapbox{order:2;height:60vh;margin-top:14px}
    .tb-lab{display:none} .maptit{font-size:12px;max-width:calc(100% - 90px)} .serie-full{height:220px} }
+  .lg{display:inline-block;width:16px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+  #ests td:first-child{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .est-resumo{font-size:12px;color:var(--suave);margin:0 0 6px;line-height:1.5}
+  .est-resumo b{color:var(--cor)}
+  .abas button{padding:7px 1px;font-size:11.5px}
 </style>
 </head>
 <body>
@@ -174,16 +179,19 @@
     <button role="tab" data-aba="a-sub">Sub-bacias</button>
     <button role="tab" data-aba="a-ext">Mais secos</button>
     <button role="tab" data-aba="a-cls">Classes</button>
+    <button role="tab" data-aba="a-est">Estações</button>
   </div>
   <div class="aba on" id="a-res"><table id="stats"></table></div>
   <div class="aba" id="a-sub"><div class="aba-nota">Clique para trocar de recorte</div><table id="subs"></table></div>
   <div class="aba" id="a-ext"><div class="aba-nota">Meses mais secos da série</div><table id="extremos"></table></div>
   <div class="aba" id="a-cls"><table id="classes"></table></div>
+  <div class="aba" id="a-est"><div class="est-resumo" id="estnota"></div><table id="ests"></table></div>
   <a class="btn" id="dl" href="#" download>Baixar GeoTIFF</a>
   <a class="btn" id="dlpng" href="#">Baixar mapa (PNG)</a>
   <a class="btn sec" href="serie_subbacias.csv" download>Baixar série em CSV</a>
   <div class="foot">
     Fonte: CHIRPS v3.0 (UCSB/Climate Hazards Center).<br>
+    Estações: Programa de Monitoramento Climatológico (PMC).<br>
     Recorte: Bacia do Rio Madeira e sub-bacias.<br>
     Atualizado em <span id="ger"></span>.<br>
     Elaborado por: Gabriel Leitoles.
@@ -293,7 +301,7 @@ BASES.forEach(b=>{
 let baseAtual=BASES[0];
 baseAtual.layer.addTo(map);
 map.on('baselayerchange',e=>{baseAtual=BASES.find(b=>b.layer===e.layer)||baseAtual;});
-L.control.layers(camadasBase,null,{position:'topright', collapsed:true}).addTo(map);
+const ctrlCamadas=L.control.layers(camadasBase,null,{position:'topright', collapsed:true}).addTo(map);
 
 const selR=document.getElementById('rec'), selP=document.getElementById('periodo');
 const sl=document.getElementById('tslider'), tlab=document.getElementById('tlab');
@@ -449,7 +457,7 @@ function render(){
              dl.textContent='Baixar GeoTIFF'; }
   else { dl.className='btn off'; dl.removeAttribute('href');
          dl.textContent='GeoTIFF só nos anos recentes'; }
-  sparkline(); estadoPNG();
+  sparkline(); estadoPNG(); estacoesMes(p);
   history.replaceState(null,'','#'+selR.value+'/'+p);
 }
 
@@ -636,6 +644,108 @@ document.getElementById('opac').oninput=e=>{
   document.getElementById('opv').textContent=Math.round(e.target.value*100)+'%';
   if(layer) layer.setOpacity(+e.target.value);};
 window.addEventListener('resize',()=>sparkline());
+
+const EST_ANOM=false;
+// ---- estações pluviométricas x CHIRPS (valor do pixel onde está a estação) ----
+// chuva: chuva do mês; anomalia: estação contra a própria normal, CHIRPS contra a normal 1981-2025
+let EST=null; const estLayer=L.layerGroup();
+map.createPane('est').style.zIndex=610;   // acima dos contornos, que capturam o clique
+fetch('estacoes.json').then(r=>r.ok?r.json():null).then(j=>{ if(!j) return;
+  EST=j; EST.idx=Object.fromEntries(j.meses.map((m,i)=>[m,i]));
+  EST.mk=j.est.map((e,k)=>L.circleMarker([e.lat,e.lon],{pane:'est',radius:6,weight:1.5,color:'#1a1a1a',fillOpacity:1})
+    .on('click',ev=>{L.DomEvent.stopPropagation(ev); abrirEstacao(k);}).addTo(estLayer));
+  estLayer.addTo(map); ctrlCamadas.addOverlay(estLayer,'Estações pluviométricas');
+  if(PER.length) estacoesMes(PER[+sl.value]);
+});
+const sg=(v,c)=>(v>0?'+':'')+nf(v,c);
+const corr=(a,b)=>{const n=a.length; if(n<5) return null; const ma=a.reduce((x,y)=>x+y)/n, mb=b.reduce((x,y)=>x+y)/n;
+  let sab=0,saa=0,sbb=0; a.forEach((x,i)=>{sab+=(x-ma)*(b[i]-mb); saa+=(x-ma)**2; sbb+=(b[i]-mb)**2;});
+  return saa&&sbb?sab/Math.sqrt(saa*sbb):null;};
+function resumoPares(P,S){
+  const a=[],b=[]; P.forEach((v,i)=>{if(v!==null&&S[i]!==null){a.push(v);b.push(S[i]);}});
+  const sa=a.reduce((x,y)=>x+y,0), sb=b.reduce((x,y)=>x+y,0);
+  return {n:a.length, r:corr(a,b), vies:sa>0?100*(sb/sa-1):null, ma:a.length?sa/a.length:null, mb:b.length?sb/b.length:null,
+    sinal:a.filter((v,i)=>Math.sign(v)===Math.sign(b[i])).length,
+    mae:a.length?a.reduce((x,v,i)=>x+Math.abs(b[i]-v),0)/a.length:null};}
+function valEst(k,i){
+  if(i===undefined||EST.zsusp[k].includes(i)) return null; const v=EST.pluv[k][i]; if(v===null) return null;
+  if(!EST_ANOM) return v; const nm=EST.normal[k][+EST.meses[i].slice(5)-1]; return nm===null?null:v-nm;}
+function satEst(k,i){return i===undefined?null:(EST_ANOM?EST.asat:EST.sat)[k][i];}
+function difTxt(v,s){  // diferença do satélite em relação à estação
+  if(!EST_ANOM){const p=v>0?100*(s/v-1):null; return p===null?null:{t:sg(p,0)+'%',c:p<0?'#B84A00':'#0d6b8f'};}
+  return {t:sg(s-v,0)+' mm',c:Math.sign(v)===Math.sign(s)?'#5e6b73':'#B84A00'};}   // laranja: sinais opostos
+function estacoesMes(p){
+  if(!EST) return; const i=EST.idx[p], linhas=[];
+  EST.est.forEach((e,k)=>{
+    const v=valEst(k,i), s=satEst(k,i), mk=EST.mk[k], zs=i!==undefined&&EST.zsusp[k].includes(i);
+    mk.setStyle(v===null?{fillColor:'#fff',color:'#8a969c',weight:1.2,dashArray:'2,2'}:{fillColor:cor(v),color:'#1a1a1a',weight:1.5,dashArray:null});
+    mk.setRadius(v===null?4:6);
+    const d=v!==null&&s!==null?difTxt(v,s):null;
+    mk.bindTooltip(`<b>${e.n}</b><br>`+(v===null?(zs?`0 mm registrado, mas o satélite indica ${nf(EST.sat[k][i],0)} mm:<br>provável falha, fora das estatísticas`:
+        (EST_ANOM&&i!==undefined&&EST.pluv[k][i]!==null?'Estação sem normal para este mês':'Sem dado no mês')):
+      (EST_ANOM?`Estação: ${sg(v,1)} mm (vs. a própria normal)<br>CHIRPS (pixel): ${s===null?'—':sg(s,1)+' mm'}`:
+                `Pluviômetro: ${nf(v,1)} mm<br>CHIRPS (pixel): ${s===null?'—':nf(s,1)+' mm'}`)+
+      (d?`<br>Satélite: ${d.t}`:'')),{direction:'top',offset:[0,-4]});
+    const dentro=selR.value===CFG.slug_bacia?e.rec.length>0:e.rec.includes(selR.value);
+    if(dentro&&v!==null&&s!==null) linhas.push({k,e,v,s,d});
+  });
+  const R=resumoPares(linhas.map(x=>x.v),linhas.map(x=>x.s));
+  document.getElementById('estnota').innerHTML=!linhas.length?'Nenhuma estação com dado neste mês e recorte.':(EST_ANOM?
+    `<b>${R.n}</b> estações · anomalia média: estação <b>${sg(R.ma,0)} mm</b>, CHIRPS <b>${sg(R.mb,0)} mm</b> · mesmo sinal em <b>${R.sinal} de ${R.n}</b>`+
+    (R.r===null?'':` · correlação <b>${nf(R.r,2)}</b>`)+'<br>Anomalia estação / CHIRPS (mm) e diferença do satélite; em laranja, sinais opostos. A estação é comparada com a própria normal. Clique para ver a série.':
+    `<b>${R.n}</b> estações com dado · média pluviômetro <b>${nf(R.ma,0)} mm</b>, CHIRPS <b>${nf(R.mb,0)} mm</b>`+
+    (R.vies===null?'':` · satélite <b>${sg(R.vies,0)}%</b>`)+(R.r===null?'':` · correlação <b>${nf(R.r,2)}</b>`)+
+    '<br>Pluviômetro / CHIRPS (mm) e diferença do satélite. Clique para ver a série.');
+  linhas.sort((a,b)=>Math.abs(b.s-b.v)-Math.abs(a.s-a.v));
+  const f=EST_ANOM?(x=>sg(x,0)):(x=>nf(x,0));
+  document.getElementById('ests').innerHTML=linhas.map(x=>
+    `<tr class="lnk" data-k="${x.k}" title="${x.e.n} (${x.e.op})"><td>${x.e.n}</td><td>${f(x.v)} / ${f(x.s)}`+
+    (x.d?`<small style="color:${x.d.c}">${x.d.t}</small>`:'')+'</td></tr>').join('');
+  document.querySelectorAll('#ests tr.lnk').forEach(tr=>tr.onclick=()=>abrirEstacao(+tr.dataset.k));
+}
+function abrirEstacao(k){
+  // série começa no 1º mês com dado da estação (antes disso só haveria o satélite)
+  const e=EST.est[k], P0=EST.meses.map((_,i)=>valEst(k,i)), o=Math.max(0,Math.min(P0.findIndex(v=>v!==null),P0.length-2));
+  const M=EST.meses.slice(o), n=M.length, P=P0.slice(o), S=M.map((_,i)=>satEst(k,i+o));
+  const R=resumoPares(P,S);
+  const m=document.createElement('div'); m.className='modal';
+  m.innerHTML='<div class="modal-c" role="dialog" aria-modal="true"><div class="modal-h"><b></b>'+
+    '<button class="x" aria-label="Fechar">×</button></div><div class="eixo-y">'+
+    `<span><i class="lg" style="background:#1a1a1a"></i>${EST_ANOM?'Estação (vs. a própria normal)':'Pluviômetro'}</span>`+
+    `<span><i class="lg" style="background:#E8590C"></i>CHIRPS v3.0 no pixel${EST_ANOM?' (vs. normal 1981-2025)':''}</span><span class="st"></span></div>`+
+    '<svg class="serie-full"></svg><div class="eixo-anos"></div>'+
+    '<div class="modal-n">Passe o mouse para ver o valor · clique para ir ao mês · Esc fecha</div></div>';
+  m.querySelector('b').textContent=e.n+' · '+e.op+' · '+e.pais;
+  m.querySelector('.st').innerHTML=!R.n?'sem meses com os dois dados':(EST_ANOM?
+    `${R.n} meses · mesmo sinal em ${nf(100*R.sinal/R.n,0)}%`:`${R.n} meses com os dois dados · satélite ${sg(R.vies,0)}% · erro médio ${nf(R.mae,0)} mm`)+
+    (R.r===null?'':` · correlação ${nf(R.r,2)}`);
+  document.body.appendChild(m);
+  const svg=m.querySelector('svg'), W=svg.clientWidth||900, H=svg.clientHeight||300, pd=6, ns='http://www.w3.org/2000/svg';
+  const vs=[...P,...S].filter(v=>v!==null), mx=Math.max(1,...vs)*1.05, mn=Math.min(0,...vs)*1.05;
+  const X=i=>pd+i*(W-2*pd)/(n-1), Y=v=>H-pd-(v-mn)/(mx-mn)*(H-2*pd);
+  const caminho=A=>A.map((v,i)=>v===null?'':((i&&A[i-1]!==null?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1))).join('');
+  const add=(tag,at)=>{const el=document.createElementNS(ns,tag); Object.entries(at).forEach(([a,b])=>el.setAttribute(a,b)); svg.appendChild(el); return el;};
+  if(mn<0) add('line',{x1:pd,x2:W-pd,y1:Y(0),y2:Y(0),stroke:'#c5ccd4'});
+  const at=EST.idx[PER[+sl.value]]-o;
+  if(at>=0) add('line',{x1:X(at),x2:X(at),y1:pd,y2:H-pd,stroke:'#9aa7b0','stroke-dasharray':'3,3'});
+  add('path',{d:caminho(S),fill:'none',stroke:'#E8590C','stroke-width':1.6,'stroke-linejoin':'round'});
+  add('path',{d:caminho(P),fill:'none',stroke:'#1a1a1a','stroke-width':1.6,'stroke-linejoin':'round'});
+  // meses isolados (sem vizinho) não aparecem como linha: marca com ponto
+  P.forEach((v,i)=>{if(v!==null&&(i===0||P[i-1]===null)&&(i===n-1||P[i+1]===null)) add('circle',{cx:X(i),cy:Y(v),r:2.2,fill:'#1a1a1a'});});
+  m.querySelector('.eixo-anos').innerHTML=M.map((t,i)=>t.slice(5)==='01'&&+t.slice(0,4)%2===0?
+    `<span style="left:${100*i/(n-1)}%">${t.slice(0,4)}</span>`:'').join('');
+  const fv=EST_ANOM?(x=>sg(x,1)):(x=>nf(x,1));
+  const idx=ev=>{const r=svg.getBoundingClientRect(); return Math.max(0,Math.min(n-1,Math.round((ev.clientX-r.left-pd)/(r.width-2*pd)*(n-1))));};
+  svg.onmousemove=ev=>{const i=idx(ev); tipS.textContent=`${rotulo(M[i])}: estação ${P[i]===null?'—':fv(P[i])+' mm'} · CHIRPS ${S[i]===null?'—':fv(S[i])+' mm'}`;
+    tipS.style.left=(ev.clientX+12)+'px'; tipS.style.top=(ev.clientY-32)+'px'; tipS.style.display='block';};
+  svg.onmouseleave=()=>{tipS.style.display='none';};
+  const esc=ev=>{if(ev.key==='Escape') fechar();};
+  const fechar=()=>{m.remove(); tipS.style.display='none'; document.removeEventListener('keydown',esc);};
+  document.addEventListener('keydown',esc);
+  m.onclick=ev=>{if(ev.target===m) fechar();}; m.querySelector('.x').onclick=fechar;
+  svg.onclick=ev=>{const j=PER.indexOf(M[idx(ev)]); if(j<0) return; if(tocando()) parar(); sl.value=j; render(); fechar(); abrirEstacao(k);};
+  m.querySelector('.x').focus();
+}
 
 const h=location.hash.slice(1);
 if(h && h.includes('/')){
